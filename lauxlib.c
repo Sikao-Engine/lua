@@ -27,6 +27,10 @@
 #include "lauxlib.h"
 #include "llimits.h"
 
+#if defined(KIMIX_LUA_USE_MIMALLOC)	/* { */
+#include <mimalloc.h>	/* kimix: default allocator backed by mimalloc */
+#endif					/* } */
+
 
 /*
 ** {======================================================
@@ -1061,12 +1065,21 @@ LUALIB_API const char *luaL_gsub (lua_State *L, const char *s,
 
 void *luaL_alloc (void *ud, void *ptr, size_t osize, size_t nsize) {
   UNUSED(ud); UNUSED(osize);
+#if defined(KIMIX_LUA_USE_MIMALLOC)				/* { */
   if (nsize == 0) {
-    free(ptr);
-    return NULL;
+  mi_free(ptr);
+  return NULL;
   }
   else
-    return realloc(ptr, nsize);
+  return mi_realloc(ptr, nsize);
+#else						/* }{ */
+  if (nsize == 0) {
+ free(ptr);
+ return NULL;
+  }
+  else
+ return realloc(ptr, nsize);
+#endif					/* } */
 }
 
 

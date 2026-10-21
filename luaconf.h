@@ -302,7 +302,23 @@
 ** the libraries, you may want to use the following definition (define
 ** LUA_BUILD_AS_DLL to get it).
 */
-#if defined(LUA_BUILD_AS_DLL)	/* { */
+#if defined(KIMIX_LUA_BUILD_SHARED)	/* { */
+
+#if defined(_WIN32)
+#define LUA_API __declspec(dllexport)
+#else						/* }{ */
+#define LUA_API	extern __attribute__((visibility("default")))
+#endif						/* } */
+
+#elif defined(KIMIX_LUA_USE_SHARED)	/* { */
+
+#if defined(_WIN32)
+#define LUA_API __declspec(dllimport)
+#else						/* }{ */
+#define LUA_API		extern
+#endif						/* } */
+
+#elif defined(LUA_BUILD_AS_DLL)	/* { */
 
 #if defined(LUA_CORE) || defined(LUA_LIB)	/* { */
 #define LUA_API __declspec(dllexport)
