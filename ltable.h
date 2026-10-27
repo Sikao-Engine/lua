@@ -167,6 +167,11 @@ LUAI_FUNC void luaH_set (lua_State *L, Table *t, const TValue *key,
 LUAI_FUNC void luaH_finishset (lua_State *L, Table *t, const TValue *key,
                                               TValue *value, int hres);
 LUAI_FUNC Table *luaH_new (lua_State *L);
+#if defined(KIMIX_LUA_ARENA)		/* { */
+/* shrink the array part to the smallest power of two that still holds
+** every live element; returns the bytes released (0 = nothing to do) */
+LUAI_FUNC size_t luaH_shrink (lua_State *L, Table *t);
+#endif					/* } */
 LUAI_FUNC void luaH_resize (lua_State *L, Table *t, unsigned nasize,
                                                     unsigned nhsize);
 LUAI_FUNC void luaH_resizearray (lua_State *L, Table *t, unsigned nasize);

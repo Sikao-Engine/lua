@@ -409,6 +409,37 @@ static int sort (lua_State *L) {
 /* }====================================================== */
 
 
+#if defined(KIMIX_LUA_ARENA)		/* { */
+/*
+** kimix extensions.
+**
+** table.new(narr [, nrec]) presizes a fresh table, so building a big one
+** costs a single allocation instead of the block chain that the implicit
+** growth walk (1 -> 2 -> 4 -> ...) leaves behind. It is the script-side
+** twin of lua_createtable; 'table.create' is the same function under its
+** Lua 5.5 name.
+**
+** table.shrink(t) releases array-part capacity that 't' no longer needs.
+** Capacity is not observable from a script (#t and the traversal order of
+** the array part are unchanged), so this only gives memory back; it
+** returns the number of bytes released.
+*/
+static int tnew (lua_State *L) {
+  lua_Unsigned sizeseq = (lua_Unsigned)luaL_checkinteger(L, 1);
+  lua_Unsigned sizerest = (lua_Unsigned)luaL_optinteger(L, 2, 0);
+  luaL_argcheck(L, sizeseq <= cast_uint(INT_MAX), 1, "out of range");
+  luaL_argcheck(L, sizerest <= cast_uint(INT_MAX), 2, "out of range");
+  lua_createtable(L, cast_int(sizeseq), cast_int(sizerest));
+  return 1;
+}
+
+
+static int tshrink (lua_State *L) {
+  luaL_checktype(L, 1, LUA_TTABLE);
+  lua_pushinteger(L, cast(lua_Integer, lua_shrinktable(L, 1)));
+  return 1;
+}
+#endif					
 static const luaL_Reg tab_funcs[] = {
   {"concat", tconcat},
   {"create", tcreate},
@@ -417,7 +448,11 @@ static const luaL_Reg tab_funcs[] = {
   {"unpack", tunpack},
   {"remove", tremove},
   {"move", tmove},
-  {"sort", sort},
+  #if defined(KIMIX_LUA_ARENA)		/* { */
+{"new", tnew},
+  {"shrink", tshrink},
+  #endif					/* } */
+{"sort", sort},
   {NULL, NULL}
 };
 

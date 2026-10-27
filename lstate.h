@@ -327,6 +327,12 @@ typedef struct LX {
 typedef struct global_State {
   lua_Alloc frealloc;  /* function to reallocate memory */
   void *ud;         /* auxiliary data to 'frealloc' */
+#if defined(KIMIX_LUA_ARENA)		/* { */
+  /* kimix extension: the per-state memory arena that 'frealloc' serves,
+     or NULL when the state was built with a plain allocator
+     (luaL_newstate / luaL_alloc -> mimalloc) */
+  struct lua_Arena *arena;
+#endif					/* } */
   l_mem GCtotalbytes;  /* number of bytes currently allocated + debt */
   l_mem GCdebt;  /* bytes counted but not yet allocated */
   l_mem GCmarked;  /* number of objects marked in a GC cycle */

@@ -33,7 +33,11 @@
 #include "lvm.h"
 #include "lzio.h"
 
+#include "lzio.h"
 
+#if defined(KIMIX_LUA_ARENA)		/* { */
+#include "larena.h"
+#endif					/* } */
 
 #define errorstatus(s)	((s) > LUA_YIELD)
 
@@ -123,6 +127,12 @@ void luaD_seterrorobj (lua_State *L, TStatus errcode, StkId oldtop) {
 
 
 l_noret luaD_throw (lua_State *L, TStatus errcode) {
+#if defined(KIMIX_LUA_ARENA)		/* { */
+  /* an error unwinds out of a body that counted itself as an interior-pointer
+     holder without running its 'leave'; clear the net so the next compaction
+     does not assert on a stale count */
+  lua_arena_interior_reset(L);
+#endif					/* } */
   if (L->errorJmp) {  /* thread has an error handler? */
     L->errorJmp->status = errcode;  /* set status */
     LUAI_THROW(L, L->errorJmp);  /* jump to it */

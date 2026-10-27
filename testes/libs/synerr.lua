@@ -1,0 +1,3 @@
+B =NAME = 'synerr.lua'
+REQUIRED = ...
+return AA

@@ -355,6 +355,115 @@ LUA_API void (lua_warning)  (lua_State *L, const char *msg, int tocont);
 
 /* number of parameters */
 #define LUA_GCPN		6
+#if defined(KIMIX_LUA_ARENA)	/* { */
+/*
+** {==================================================================
+** kimix extension: per-state memory arena
+** ===================================================================
+** A lua_Alloc implementation with size-class recycling for small
+** blocks, exact-size recycling for table array/node blocks, a cached
+** "huge" tier above 'small_max' and a trim/purge policy. It is opt-in:
+** 'luaL_newstate' (luaL_alloc -> mimalloc) is untouched, and a state
+** built with 'luaL_newstate_arena' behaves identically from Lua's
+** point of view -- only the footprint differs.
+**
+** Two extra 'lua_gc' opcodes drive it from a plain C host:
+**   lua_gc(L, LUA_GCTRIM, level)  - level 0: return empty segments;
+**                                   level 1: also drop the huge cache
+**                                   and purge free mimalloc pages
+**                                   (mi_collect(true))
+**   lua_gc(L, LUA_GCCOMPACT, pct) - plan/move table blocks out of
+**                                   sparse segments; 'pct' is the
+**                                   minimum saving required to act
+**                                   (0 = act whenever it can)
+** Neither opcode changes lua_Alloc's public contract.
+*/
+#define LUA_GCTRIM		10
+#define LUA_GCCOMPACT		11
+
+/* shrink a table's array part to what its live elements need; 'idx' is
+** a stack index and the result is the number of bytes released */
+LUA_API size_t (lua_shrinktable) (lua_State *L, int idx);
+/* shrink a table's array part to what its live elements need; 'idx' is
+** a stack index and the result is the number of bytes released */
+LUA_API size_t (lua_shrinktable) (lua_State *L, int idx);
+
+
+typedef struct lua_ArenaConfig {
+  size_t segment_bytes;  /* bytes carved per segment (default 64 KiB) */
+  int small_max;  /* largest slotted size; above it: the huge tier */
+  int huge_cache;  /* freed huge runs kept, per exact size (default 4) */
+  int dry_run;  /* decide/count only, allocate from mimalloc */
+  int gc_pause_pct;  /* LUA_GCPPAUSE to apply (0: leave the default) */
+  int gc_stepmul;  /* LUA_GCPSTEPMUL to apply (0: leave the default) */
+  int enable_compaction;  /* allow lua_gc(LUA_GCCOMPACT) to move blocks */
+} lua_ArenaConfig;
+
+
+typedef struct lua_ArenaStats {
+  size_t logical_live;  /* bytes requested by Lua (what GCCOUNT counts) */
+  size_t commit_bytes;  /* segments + huge runs, live or cached */
+  size_t internal_waste;  /* slot rounding + unusable segment tail */
+  size_t segment_bytes;  /* configured segment size */
+  unsigned long slots_used;
+  unsigned long slots_free;
+  unsigned long slots_total;
+  unsigned long seg_count;
+  unsigned long huge_live_bytes;
+  unsigned long huge_live_count;
+  unsigned long huge_cached;
+  unsigned long huge_cached_bytes;
+  unsigned long calls;  /* lua_Alloc calls served */
+  unsigned long trims;  /* lua_ArenaTrim calls */
+  size_t trim_bytes;  /* bytes returned to mimalloc by the trims */
+  unsigned long purges;  /* mi_collect(true) calls */
+  /* plan/dry-run counters: what the engine would do */
+  unsigned long would_segments;  /* segments it would carve */
+  unsigned long would_alloc;
+  unsigned long would_free;
+  unsigned long would_reuse;  /* hits on an existing free slot */
+  unsigned long would_huge_reuse;  /* hits on a cached huge run */
+  size_t would_shrink_bytes;  /* table capacity a shrink would return */
+  size_t would_compact_bytes;  /* segments a compaction would return */
+  size_t compacted_bytes;  /* segments a compaction did return */
+  unsigned long compactions;
+  unsigned long compaction_skips;  /* preconditions not met */
+  int dry_run;
+  int enabled;  /* 1 when an arena serves this state */
+} lua_ArenaStats;
+
+
+/* introspection for embedders and tests: the class table */
+typedef struct lua_ArenaClassInfo {
+  unsigned slot_size;  /* bytes handed out per slot */
+  unsigned seg_payload;  /* bytes in one segment of this class */
+  unsigned seg_count;
+  unsigned slots_used;
+  unsigned slots_free;
+  int tier;  /* 0 tiny, 1 small, 2 medium, 3 exact-ARR, 4 exact-NODE */
+} lua_ArenaClassInfo;
+
+LUA_API int (lua_ArenaClassCount) (void *arena);
+/* the class a request of 'size' bytes lands in; -1 = the huge tier */
+LUA_API int (lua_ArenaClassOf) (void *arena, size_t size);
+LUA_API int (lua_ArenaClassInfoGet) (void *arena, int cid,
+                                     lua_ArenaClassInfo *info);
+LUA_API void (lua_ArenaConfigDefault) (lua_ArenaConfig *cfg);
+/* fill 'st' from the arena behind 'L' (zeroed when there is none) */
+LUA_API void (lua_ArenaStatsGet) (lua_State *L, lua_ArenaStats *st);
+/* trim the arena of 'L'; returns the bytes returned to mimalloc */
+LUA_API size_t (lua_ArenaTrim) (lua_State *L, int level);
+/* handle-based entry points, usable after lua_close ('arena' is the
+** handle borrowed through luaL_arena, see lauxlib.h) */
+  LUA_API void (lua_ArenaStatsOf) (void *arena, lua_ArenaStats *st);
+  LUA_API size_t (lua_ArenaTrimHandle) (void *arena, int level);
+  LUA_API void (lua_ArenaFree) (void *arena);
+  /* how many calls hold an interior pointer right now; 0 when the
+     KIMIX_LUA_MEMCHECK net is not compiled in (it never is in a release
+     build). A compaction pass asserts this is 0. */
+  LUA_API unsigned (lua_ArenaInteriorHolders) (void *arena);
+/* }================================================================== */
+#endif						/* } */
 
 
 LUA_API int (lua_gc) (lua_State *L, int what, ...);

@@ -77,6 +77,34 @@
 #define luaM_shrinkvector(L,v,size,fs,t) \
    ((v)=cast(t *, luaM_shrinkvector_(L, v, &(size), fs, sizeof(t))))
 
+#if defined(KIMIX_LUA_ARENA)		/* { */
+/*
+** kimix extension: size-class hints.
+** The arena derives a block's size class from the requested size alone
+** (the same function maps 'osize' back on free), so these hints cannot
+** change where a block lands; they document the intent at the call site
+** and let a KIMIX_LUA_MEMCHECK build assert the invariant "the class
+** derived on alloc equals the class derived on free".
+*/
+#define LUA_MEMCLS_GENERIC	0	/* parser, stack, buffers */
+#define LUA_MEMCLS_GCOBJ	1	/* a fixed-size GCObject */
+#define LUA_MEMCLS_STR		2	/* long-string payload */
+#define LUA_MEMCLS_ARR		3	/* table array block (9*N+4) */
+#define LUA_MEMCLS_NODE		4	/* table node block (32*2^k [+16]) */
+
+LUAI_FUNC void *luaM_mallocx_ (lua_State *L, size_t size, int tag, int cls);
+LUAI_FUNC void *luaM_reallocx_ (lua_State *L, void *block, size_t osize,
+                                size_t nsize, int cls);
+LUAI_FUNC void luaM_freex_ (lua_State *L, void *block, size_t osize, int cls);
+
+#define luaM_newvectorx(L,n,t,cls)  \
+	cast(t*, luaM_mallocx_(L, cast_sizet(n)*sizeof(t), 0, (cls)))
+#define luaM_newblockx(L,size,cls)  \
+	cast(char*, luaM_mallocx_(L, (size), 0, (cls)))
+#define luaM_freememx(L,b,s,cls)  luaM_freex_(L, (b), (s), (cls))
+#define luaM_newobjectx(L,tag,s,cls)  luaM_mallocx_(L, (s), tag, (cls))
+#endif					/* } */
+
 LUAI_FUNC l_noret luaM_toobig (lua_State *L);
 
 /* not to be called directly */

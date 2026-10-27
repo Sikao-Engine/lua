@@ -102,6 +102,20 @@ LUALIB_API int (luaL_loadbufferx) (lua_State *L, const char *buff, size_t sz,
 LUALIB_API int (luaL_loadstring) (lua_State *L, const char *s);
 
 LUALIB_API lua_State *(luaL_newstate) (void);
+#if defined(KIMIX_LUA_ARENA)		/* { */
+/*
+** kimix extension: create a state whose 'lua_Alloc' is the memory arena.
+** 'cfg' may be NULL for the defaults; see lua_ArenaConfig in lua.h.
+** The state behaves exactly like one from 'luaL_newstate' (same
+** libraries available, same semantics); only the footprint differs.
+** 'luaL_arena' borrows the arena so a host can read stats and trim after
+** 'lua_close', and 'lua_ArenaFree' releases it (the host owns it).
+*/
+LUALIB_API lua_State *luaL_newstate_arena (const lua_ArenaConfig *cfg);
+LUALIB_API void *luaL_arena (lua_State *L);
+LUALIB_API void luaL_freestate_arena (lua_State *L);
+#endif					/* } */
+
 
 LUALIB_API unsigned (luaL_makeseed) (lua_State *L);
 

@@ -24,7 +24,10 @@
 #include "lstring.h"
 #include "ltable.h"
 #include "ltm.h"
-
+#if defined(KIMIX_LUA_ARENA)		/* { */
+#include <mimalloc.h>		/* mi_malloc/mi_free for the planner */
+#include "larena.h"
+#endif					/* } */
 
 /*
 ** Maximum number of elements to sweep in each single step.
@@ -296,7 +299,11 @@ void luaC_fix (lua_State *L, GCObject *o) {
 */
 GCObject *luaC_newobjdt (lua_State *L, lu_byte tt, size_t sz, size_t offset) {
   global_State *g = G(L);
+    #if defined(KIMIX_LUA_ARENA)		/* { */
+  char *p = cast_charp(luaM_newobjectx(L, novariant(tt), sz, LUA_MEMCLS_GCOBJ));
+  #else					/* }{ */
   char *p = cast_charp(luaM_newobject(L, novariant(tt), sz));
+  #endif					/* } */
   GCObject *o = cast(GCObject *, p + offset);
   o->marked = luaC_white(g);
   o->tt = tt;
@@ -1803,3 +1810,219 @@ void luaC_fullgc (lua_State *L, int isemergency) {
 /* }====================================================== */
 
 
+
+
+#if defined(KIMIX_LUA_ARENA)		/* { */
+/*
+** {==================================================================
+** Slab compaction (kimix extension)
+** ===================================================================
+** Only table array blocks may move. A Table is a GCObject -- its address
+** is what lua_topointer returns and what the GC lists hold -- a TString
+** payload has to stay put while the value lives (lua_tostring's 'const
+** char *'), and every other block is reachable from a C frame. A table
+** array block, in contrast, is referenced only by 't->array', so moving
+** it is a memcpy plus one pointer assignment; no interior pointer has to
+** be rewritten.
+**
+** The pass therefore runs only from lua_gc(LUA_GCCOMPACT) -- never from
+** luaC_checkGC, luaC_step or the emergency collection in 'tryagain' --
+** and only at a quiescent point: main thread, no C call in flight
+** (nCcalls == 0), no finalizer pending. At such a point no interior
+** pointer into an array block can exist, because the only functions that
+** form one (luaH_get*, luaH_next, luaH_pset*, luaH_resize) are entered
+** from a Lua or C call. Any precondition failure is a no-op that bumps
+** 'compaction_skips', never a crash.
+**
+** Plan, then move, then publish: a source segment is only emptied when
+** every slot it holds belongs to a table array block (so the movable
+** count equals the live count) and a target segment has room for all of
+** them. A failed step leaves the state untouched.
+*/
+size_t luaC_compact (lua_State *L, int min_saving_pct) {
+  global_State *g = G(L);
+  lua_Arena *a = g->arena;
+  unsigned offs[ARENA_MAX_CLASSES];
+  unsigned *counts;
+  unsigned nseg = 0;
+  unsigned i;
+  size_t commit = 0;
+  size_t would = 0;
+  size_t done = 0;
+  if (a == NULL)
+    return 0;
+  if (a->in_compaction || g->gcstopem != 0 || g->gcstp != 0 ||
+      L != mainthread(g) || getCcalls(L) != 0 || g->tobefnz != NULL) {
+    /* 'getCcalls' is the C-call nesting depth: the high half of nCcalls
+       only marks the main thread as non-yieldable */
+    a->compaction_skips++;
+    return 0;
+  }
+#if defined(KIMIX_LUA_MEMCHECK)
+  /* a body that formed a 'Value *' / 'Node *' into a vector is still running:
+     moving a block now would leave that pointer dangling */
+  lua_arena_check(a->interior_holders == 0);
+#endif
+  if (a->cfg.dry_run) {  /* no carved segment: report the plan, move nothing */
+    a->would_compact_bytes = lua_arena_dry_plan(a);
+    return 0;
+  }
+  for (i = 0; i < cast_uint(a->nclasses); i++) {
+    offs[i] = nseg;
+    nseg += a->classes[i].seg_count;
+    commit += cast_sizet(a->classes[i].seg_count) * a->classes[i].seg_payload;
+  }
+  if (nseg == 0)
+    return 0;
+  counts = cast(unsigned *, mi_malloc(sizeof(unsigned) * nseg));
+  if (counts == NULL) {
+    a->compaction_skips++;
+    return 0;
+  }
+  memset(counts, 0, sizeof(unsigned) * nseg);
+  {  /* ---- plan: count live table array blocks per (class, segment) ---- */
+    GCObject *o;
+    for (o = g->allgc; o != NULL; o = o->next) {
+      Table *t;
+      size_t bytes;
+      int cid;
+      ArenaClass *c;
+      ArenaSeg *seg;
+      if (o->tt != LUA_VTABLE)
+        continue;
+      t = gco2t(o);
+      if (t->array == NULL)
+        continue;
+      bytes = cast_sizet(t->asize) * (sizeof(Value) + 1) + sizeof(unsigned);
+      cid = lua_arena_classof(a, bytes);
+      if (cid == ARENA_CLASS_NONE)
+        continue;			/* the huge tier: not movable */
+      c = &a->classes[cid];
+      seg = lua_arena_segment(c, cast_voidp(t->array - t->asize));
+      if (seg == NULL)
+        continue;
+      counts[offs[cid] + lua_arena_segment_index(c, seg)]++;
+    }
+  }
+  {  /* ---- decide: which segments can be emptied, and where to ---- */
+    /*
+    ** A segment is a source only when every slot it holds is a movable
+    ** table array block; it is chosen sparsest first (the most free slots,
+    ** hence the fewest blocks to move), and only while the slots left in
+    ** the remaining segments can host them. Once the sparsest candidate no
+    ** longer fits, no other candidate can: every other one has fewer free
+    ** slots and therefore more blocks to move. Fenced sources are flagged
+    ** so the mover never allocates into them.
+    */
+    unsigned j;
+    for (i = 0; i < cast_uint(a->nclasses); i++) {
+      ArenaClass *c = &a->classes[i];
+      unsigned target_free = 0;	/* free slots in the segments left alone */
+      unsigned to_move = 0;	/* blocks the chosen sources contribute */
+        if (c->seg_count < 2 || c->segs == NULL)
+          continue;			/* nothing to move into */
+      for (j = 0; j < c->seg_count; j++)
+        target_free += c->segs[j]->nfree;
+      for (;;) {
+        unsigned best = c->seg_count;
+        unsigned best_free = 0;
+        for (j = 0; j < c->seg_count; j++) {
+          ArenaSeg *seg = c->segs[j];
+          unsigned live = seg->nslots - seg->nfree;
+          unsigned movable = counts[offs[i] + j];
+          if ((seg->flags & ARENA_SEG_NOSLOT) != 0)
+            continue;			/* already picked as a source */
+          if (!(seg->nfree > 0 && live > 0 && movable == live))
+            continue;			/* holds something that cannot move */
+          if (best == c->seg_count || seg->nfree > best_free) {
+            best = j;
+            best_free = seg->nfree;
+          }
+        }
+        if (best >= c->seg_count)
+          break;			/* no candidate left */
+{
+          ArenaSeg *seg = c->segs[best];
+          unsigned live = seg->nslots - seg->nfree;
+          /* its blocks must fit in the free slots of the segments that stay */
+          if (to_move + live > target_free - seg->nfree)
+            break;
+          to_move += live;
+          target_free -= seg->nfree;
+          would += c->seg_payload;
+          seg->flags |= ARENA_SEG_NOSLOT;	/* a source, not a target */
+        }
+      }
+    }
+  }
+  a->would_compact_bytes = would;
+  if (a->cfg.dry_run || a->cfg.enable_compaction == 0 ||
+      (min_saving_pct > 0 &&
+       would * 100 < cast_sizet(min_saving_pct) * commit)) {
+    /* plan only: report it, move nothing */
+    for (i = 0; i < cast_uint(a->nclasses); i++) {
+      ArenaClass *c = &a->classes[i];
+      unsigned j;
+      for (j = 0; j < c->seg_count; j++)
+        c->segs[j]->flags &= ~ARENA_SEG_NOSLOT;
+    }
+    mi_free(counts);
+    return 0;
+  }
+  a->in_compaction = 1;
+  {  /* ---- move every live block out of the fenced segments ---- */
+    GCObject *o;
+    for (o = g->allgc; o != NULL; o = o->next) {
+      Table *t;
+      size_t bytes;
+      int cid;
+      ArenaClass *c;
+      ArenaSeg *seg;
+      void *block;
+      void *nblock;
+      if (o->tt != LUA_VTABLE)
+        continue;
+      t = gco2t(o);
+      if (t->array == NULL)
+        continue;
+      bytes = cast_sizet(t->asize) * (sizeof(Value) + 1) + sizeof(unsigned);
+      cid = lua_arena_classof(a, bytes);
+      if (cid == ARENA_CLASS_NONE)
+        continue;
+      c = &a->classes[cid];
+      block = cast_voidp(t->array - t->asize);
+      seg = lua_arena_segment(c, block);
+      if (seg == NULL || (seg->flags & ARENA_SEG_NOSLOT) == 0)
+        continue;
+      nblock = lua_arena_take_slot(a, cid);
+      if (nblock == NULL)
+        continue;			/* out of targets: leave this one */
+      memcpy(nblock, block, bytes);
+      t->array = cast(Value *, cast_charp(nblock) +
+                                 cast_sizet(t->asize) * sizeof(Value));
+      lua_arena_give_slot(a, cid, block);
+    }
+  }
+  {  /* ---- publish: drop the segments that are now wholly free ---- */
+    for (i = 0; i < cast_uint(a->nclasses); i++) {
+      ArenaClass *c = &a->classes[i];
+      unsigned j = c->seg_count;
+      while (j-- > 0) {
+        ArenaSeg *seg = c->segs[j];
+        if ((seg->flags & ARENA_SEG_NOSLOT) == 0)
+          continue;
+        seg->flags &= ~ARENA_SEG_NOSLOT;
+        if (lua_arena_release_segment(a, cast_int(i), seg))
+          done += c->seg_payload;
+      }
+    }
+  }
+  a->in_compaction = 0;
+  a->compactions++;
+  a->compacted_bytes += done;
+  mi_free(counts);
+  return done;
+}
+
+/* }================================================================== */
+#endif					/* } */

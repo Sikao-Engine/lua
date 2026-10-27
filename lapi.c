@@ -1241,7 +1241,18 @@ LUA_API int lua_gc (lua_State *L, int what, ...) {
         g->gcparams[param] = luaO_codeparam(cast_uint(value));
       break;
     }
-    default: res = -1;  /* invalid option */
+    #if defined(KIMIX_LUA_ARENA)		/* { */
+    case LUA_GCTRIM: {  /* kimix: return empty segments to mimalloc */
+      int level = va_arg(argp, int);
+      res = cast_int(lua_ArenaTrim(L, level));
+      break;
+    }
+    case LUA_GCCOMPACT: {  /* kimix: pack table blocks out of sparse slabs */
+      int saving = va_arg(argp, int);
+      res = cast_int(luaC_compact(L, saving));
+      break;
+    }
+    #endif					/* } */    default: res = -1;  /* invalid option */
   }
   va_end(argp);
   lua_unlock(L);
@@ -1332,6 +1343,19 @@ LUA_API lua_Alloc lua_getallocf (lua_State *L, void **ud) {
 }
 
 
+#if defined(KIMIX_LUA_ARENA)		/* { */
+/*
+** Shrink the array part of the table at 'idx'; returns the number of
+** bytes released. A no-op for a non-table, for a table with no array
+** part and for one that is not sparse enough to be worth a move.
+*/
+LUA_API size_t lua_shrinktable (lua_State *L, int idx) {
+  const TValue *o = index2value(L, idx);
+  if (!ttistable(o))
+    return 0;
+  return luaH_shrink(L, hvalue(o));
+}
+#endif					
 LUA_API void lua_setallocf (lua_State *L, lua_Alloc f, void *ud) {
   lua_lock(L);
   G(L)->ud = ud;

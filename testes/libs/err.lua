@@ -1,0 +1,3 @@
+B = 15; a = a + 1;NAME = 'err.lua'
+REQUIRED = ...
+return AA

@@ -253,6 +253,11 @@
 	iscollectable(v) ? luaC_objbarrierback(L, p, gcvalue(v)) : cast_void(0))
 
 LUAI_FUNC void luaC_fix (lua_State *L, GCObject *o);
+#if defined(KIMIX_LUA_ARENA)		/* { */
+/* kimix extension: move table array blocks out of sparse segments;
+** 'min_saving_pct' is the minimum gain required to act (0 = always) */
+LUAI_FUNC size_t luaC_compact (lua_State *L, int min_saving_pct);
+#endif					
 LUAI_FUNC void luaC_freeallobjects (lua_State *L);
 LUAI_FUNC void luaC_step (lua_State *L);
 LUAI_FUNC void luaC_runtilstate (lua_State *L, int state, int fast);

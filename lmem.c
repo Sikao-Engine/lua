@@ -20,6 +20,9 @@
 #include "lmem.h"
 #include "lobject.h"
 #include "lstate.h"
+#if defined(KIMIX_LUA_ARENA)		/* { */
+#include "larena.h"
+#endif					/* } */
 
 
 
@@ -213,3 +216,37 @@ void *luaM_malloc_ (lua_State *L, size_t size, int tag) {
     return newblock;
   }
 }
+
+#if defined(KIMIX_LUA_ARENA)		/* { */
+/*
+** kimix extension: the hint-carrying allocation funnel.
+**
+** A block's size class is a pure function of the requested size
+** ('lua_arena_classof'), and the very same function maps 'osize' back
+** when the block is freed, so a hint cannot and must not change where a
+** block lands -- if it could, a mismatched hint would corrupt the heap.
+** What the hint does is record the intent at the call site, which is
+** what 'test_lua_arena' checks by walking these files for alloc/free
+** pairs, and it is the place a future compaction pass would consult to
+** know whether a block may move.
+*/
+void *luaM_mallocx_ (lua_State *L, size_t size, int tag, int cls) {
+  UNUSED(cls);
+  return luaM_malloc_(L, size, tag);
+}
+
+
+void *luaM_reallocx_ (lua_State *L, void *block, size_t osize, size_t nsize,
+                      int cls) {
+  UNUSED(cls);
+  return luaM_realloc_(L, block, osize, nsize);
+}
+
+
+void luaM_freex_ (lua_State *L, void *block, size_t osize, int cls) {
+  UNUSED(cls);
+  luaM_free_(L, block, osize);
+}
+
+/* }================================================================== */
+#endif					/* } */

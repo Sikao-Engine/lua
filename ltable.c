@@ -35,9 +35,25 @@
 #include "lmem.h"
 #include "lobject.h"
 #include "lstate.h"
+#if defined(KIMIX_LUA_ARENA)		/* { */
+#include "larena.h"
+#endif					
 #include "lstring.h"
 #include "ltable.h"
 #include "lvm.h"
+
+#if defined(KIMIX_LUA_ARENA)		/* { */
+/*
+** Interior-pointer net for the compaction pass (see larena.h). The two
+** functions below both form a 'Value *' / 'Node *' into a vector and can be
+** entered from outside a Lua/C call, so they bump the arena's holder count
+** around their body: a compaction that would invalidate that pointer then
+** trips an assert in a KIMIX_LUA_MEMCHECK build instead of corrupting the
+** table. The counter is a no-op in a release build.
+*/
+#define luaH_interior_enter(L)	lua_arena_interior_enter(L)
+#define luaH_interior_leave(L)	lua_arena_interior_leave(L)
+#endif					/* } */
 
 
 /*
@@ -358,7 +374,27 @@ static unsigned findindex (lua_State *L, Table *t, TValue *key,
 }
 
 
+static int luaH_nextbody (lua_State *L, Table *t, StkId key);
+
+/*
+** 'next' walks the array tags or the node vector and hands out a pointer
+** into it, so it counts as an interior-pointer holder while it runs: a
+** compaction that moved the block underneath it is an assert, not corruption.
+*/
 int luaH_next (lua_State *L, Table *t, StkId key) {
+#if defined(KIMIX_LUA_ARENA)
+  int res;
+  luaH_interior_enter(L);
+  res = luaH_nextbody(L, t, key);
+  luaH_interior_leave(L);
+  return res;
+#else
+  return luaH_nextbody(L, t, key);
+#endif
+}
+
+
+static int luaH_nextbody (lua_State *L, Table *t, StkId key) {
   unsigned int asize = t->asize;
   unsigned int i = findindex(L, t, s2v(key), asize);  /* find original key */
   for (; i < asize; i++) {  /* try first array part */
@@ -393,8 +429,12 @@ static size_t sizehash (Table *t) {
 static void freehash (lua_State *L, Table *t) {
   if (!isdummy(t)) {
     /* get pointer to the beginning of Node array */
-    char *arr = cast_charp(t->node) - extraLastfree(t);
-    luaM_freearray(L, arr, sizehash(t));
+          char *arr = cast_charp(t->node) - extraLastfree(t);
+      #if defined(KIMIX_LUA_ARENA)		/* { */
+      luaM_freememx(L, arr, sizehash(t), LUA_MEMCLS_NODE);
+      #else					/* }{ */
+      luaM_freearray(L, arr, sizehash(t));
+      #endif					/* } */
   }
 }
 
@@ -566,14 +606,31 @@ static Value *resizearray (lua_State *L , Table *t,
   if (oldasize == newasize)
     return t->array;  /* nothing to be done */
   else if (newasize == 0) {  /* erasing array? */
-    Value *op = t->array - oldasize;  /* original array's real address */
-    luaM_freemem(L, op, concretesize(oldasize));  /* free it */
+          Value *op = t->array - oldasize;  /* original array's real address */
+      #if defined(KIMIX_LUA_ARENA)		/* { */
+      luaM_freememx(L, op, concretesize(oldasize), LUA_MEMCLS_ARR);
+      #else					/* }{ */
+      luaM_freemem(L, op, concretesize(oldasize));  /* free it */
+      #endif					/* } */
     return NULL;
   }
-  else {
-    size_t newasizeb = concretesize(newasize);
-    Value *np = cast(Value *,
-                  luaM_reallocvector(L, NULL, 0, newasizeb, lu_byte));
+    else {
+            size_t newasizeb = concretesize(newasize);
+        #if defined(KIMIX_LUA_ARENA)		/* { */
+        /*
+        ** 'luaH_resize' builds the new hash part before this call and frees
+        ** it only when the array allocation reports failure ('NULL'). A
+        ** raising allocation here (luaM_newblockx -> luaM_malloc_ ->
+        ** luaM_error) would therefore leak that hash block on every out-of-
+        ** memory retry, so the guarded path keeps upstream's non-raising
+        ** contract and only adds the class hint.
+        */
+        Value *np = cast(Value *, luaM_reallocx_(L, NULL, 0, newasizeb,
+                                                 LUA_MEMCLS_ARR));
+        #else					/* }{ */
+        Value *np = cast(Value *,
+                      luaM_reallocvector(L, NULL, 0, newasizeb, lu_byte));
+        #endif					/* } */
     if (np == NULL)  /* allocation error? */
       return NULL;
     np += newasize;  /* shift pointer to the end of value segment */
@@ -611,11 +668,19 @@ static void setnodevector (lua_State *L, Table *t, unsigned size) {
     if (lsize > MAXHBITS || (1 << lsize) > MAXHSIZE)
       luaG_runerror(L, "table overflow");
     size = twoto(lsize);
-    if (lsize < LIMFORLAST)  /* no 'lastfree' field? */
-      t->node = luaM_newvector(L, size, Node);
-    else {
-      size_t bsize = size * sizeof(Node) + sizeof(Limbox);
-      char *node = luaM_newblock(L, bsize);
+          #if defined(KIMIX_LUA_ARENA)		/* { */
+      if (lsize < LIMFORLAST)  /* no 'lastfree' field? */
+        t->node = luaM_newvectorx(L, size, Node, LUA_MEMCLS_NODE);
+      else {
+        size_t bsize = size * sizeof(Node) + sizeof(Limbox);
+        char *node = luaM_newblockx(L, bsize, LUA_MEMCLS_NODE);
+      #else					/* }{ */
+      if (lsize < LIMFORLAST)  /* no 'lastfree' field? */
+        t->node = luaM_newvector(L, size, Node);
+      else {
+        size_t bsize = size * sizeof(Node) + sizeof(Limbox);
+        char *node = luaM_newblock(L, bsize);
+      #endif					/* } */
       t->node = cast(Node *, node + sizeof(Limbox));
       getlastfree(t) = gnode(t, size);  /* all positions are free */
     }
@@ -712,8 +777,27 @@ static void clearNewSlice (Table *t, unsigned oldasize, unsigned newasize) {
 ** the old one ('oldasize'), this function will do nothing with that
 ** part.
 */
+static void luaH_resizebody (lua_State *L, Table *t, unsigned newasize,
+                             unsigned nhsize);
+
+/*
+** A resize allocates (and can raise) while 't->array' / 't->node' are still
+** the old blocks, so it runs as an interior-pointer holder.
+*/
 void luaH_resize (lua_State *L, Table *t, unsigned newasize,
                                           unsigned nhsize) {
+#if defined(KIMIX_LUA_ARENA)
+  luaH_interior_enter(L);
+  luaH_resizebody(L, t, newasize, nhsize);
+  luaH_interior_leave(L);
+#else
+  luaH_resizebody(L, t, newasize, nhsize);
+#endif
+}
+
+
+static void luaH_resizebody (lua_State *L, Table *t, unsigned newasize,
+                                            unsigned nhsize) {
   Table newt;  /* to keep the new hash part */
   unsigned oldasize = t->asize;
   Value *newarray;
@@ -747,6 +831,51 @@ void luaH_resize (lua_State *L, Table *t, unsigned newasize,
 }
 
 
+#if defined(KIMIX_LUA_ARENA)		/* { */
+/*
+** Shrink the array part of 't' to the smallest power of two that still
+** holds every live element. Capacity is invisible to scripts (#t and the
+** traversal order of the array part do not change), so this is a pure
+** memory policy. Elements that would fall outside the new array part are
+** re-inserted into the hash part by 'luaH_resize', so a shrink can never
+** lose a key.
+*/
+size_t luaH_shrink (lua_State *L, Table *t) {
+  unsigned asize = t->asize;
+  unsigned last = 0;
+  unsigned newasize = 1;
+  size_t before, after;
+  if (asize < 64)			/* too small to be worth a walk */
+    return 0;
+  {  /* find the last non-empty slot: O(asize) over the array we shrink */
+    unsigned i = asize;
+    while (i > 0) {
+      if (!tagisempty(*getArrTag(t, i - 1))) {
+        last = i;
+        break;
+      }
+      i--;
+    }
+  }
+  while (newasize < last)
+    newasize <<= 1;
+  /* policy: only when the array is at most half full and the gain is
+     real (a few slots are not worth a block move) */
+  if (last > asize / 2 || asize - newasize < 16)
+    return 0;
+  before = concretesize(asize);
+  after = concretesize(newasize);
+  {  /* in a dry run, only report what a shrink would return */
+    lua_Arena *a = G(L)->arena;
+    if (a != NULL && a->cfg.dry_run) {
+      a->would_shrink_bytes += before - after;
+      return 0;
+    }
+  }
+  luaH_resize(L, t, newasize, allocsizenode(t));
+  return (before > after) ? before - after : 0;
+}
+#endif					
 void luaH_resizearray (lua_State *L, Table *t, unsigned int nasize) {
   unsigned nsize = allocsizenode(t);
   luaH_resize(L, t, nasize, nsize);

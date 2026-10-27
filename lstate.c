@@ -372,6 +372,11 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   incnny(L);  /* main thread is always non yieldable */
   g->frealloc = f;
   g->ud = ud;
+#if defined(KIMIX_LUA_ARENA)		/* { */
+  /* a plain state (luaL_newstate / luaL_alloc) has no arena: everything that
+     asks 'G(L)->arena' must see NULL, never an uninitialized field */
+  g->arena = NULL;
+#endif					/* } */
   g->warnf = NULL;
   g->ud_warn = NULL;
   g->seed = seed;
