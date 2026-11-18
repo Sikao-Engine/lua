@@ -20,7 +20,9 @@
 **   small      <= small_max : x1.25 steps snapped to 16
 **   medium     <= small_max : the same ladder (it is continuous;
 **                             tiny/small/medium only label it)
-**   exact-ARR  <= small_max : 9*N+4 with N a power of two, no rounding
+**   exact-ARR  <= small_max : 9*N+4 with N a power of two, rounded up to
+**                             the slot alignment (8) -- still one class per
+**                             request size, but never a misaligned slot
 **   exact-NODE <= small_max : 32*2^k (+16 for the 'lastfree' prefix)
 **   huge       >  small_max : one exact run from mimalloc + a per-size
 **                             LRU of freed runs
@@ -31,6 +33,13 @@
 ** slot hold 'next'), so an empty segment is exactly a segment whose free
 ** count equals its slot count -- which is what 'trim' hands back to
 ** mimalloc. No locks: one arena per lua_State.
+**
+** Every slot a class hands out is aligned for the interpreter's own types
+** ('Value', 'Node', the 'TString' header, the VM stack): the granule, the
+** ladder and the node classes are 16/32-byte multiples by construction, the
+** huge tier is a mimalloc run, and the exact array classes are rounded up to
+** 'ARENA_ALIGN' (8) by 'arena_build' so that their stride cannot walk a block
+** onto a 4-mod-8 address.
 */
 
 #ifndef larena_h

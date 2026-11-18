@@ -37,6 +37,25 @@ static unsigned arena_align16 (size_t n) {
 }
 
 
+/*
+** Slot alignment. Every block the arena hands out is read and written as an
+** interpreter type -- 'Value' (8 bytes: a 'lua_Number' or a pointer), 'Node',
+** the 'TString' header, 'Table', 'CallInfo', the VM stack -- so a slot has to
+** carry at least 'alignof(void *)' bytes of alignment. The tiny tier (16-byte
+** granule), the generic ladder (16-snapped) and the node classes (32*2^k, +16)
+** are aligned by construction, and the huge tier is a plain mimalloc run; the
+** exact table-array classes below are the one place a stride can lose it,
+** because '9*N+4' is an odd multiple of 4 for every N. Rounding their slot up
+** keeps the class "one request size, reused verbatim" while making the slot
+** start of every class aligned.
+*/
+#define ARENA_ALIGN	8u
+
+static unsigned arena_align (size_t n) {
+  return cast_uint((n + (ARENA_ALIGN - 1u)) & ~cast_sizet(ARENA_ALIGN - 1u));
+}
+
+
 static int arena_log2 (size_t v) {
   int l = 0;
   while (v > 1) {
@@ -142,23 +161,33 @@ static void arena_build (lua_Arena *a) {
                                                 : ARENA_TIER_MEDIUM);
     s = next;
   }
-  /* exact-size classes: table array blocks (9*N+4, N = 2^k) */
+  /* exact-size classes: table array blocks (9*N+4, N = 2^k). The slot is
+     'arena_align'ed up: '9*N+4' is not a multiple of the interpreter's value
+     alignment, so packing slots at that stride would hand out a block at a
+     4-mod-8 address on every other slot, and the interpreter writes 8-byte
+     'Value's straight into it. The class still serves its request verbatim (a
+     freed block is reused by the next one of the same size); it just never
+     hands out a slot smaller than an aligned one. */
   for (log = 0; log < 32; log++) {
     size_t bytes = (cast_sizet(9) << log) + 4;
     if (bytes > (size_t)a->cfg.small_max)
       break;
-    a->arr_by_log[log] = arena_addclass(a, cast_uint(bytes), ARENA_TIER_ARR);
+    a->arr_by_log[log] = arena_addclass(a, arena_align(bytes),
+                                        ARENA_TIER_ARR);
   }
   /* exact-size classes: table node blocks (32*2^k, plus the '+16' variant
-     when the node array carries a 'lastfree' prefix) */
+     when the node array carries a 'lastfree' prefix). 'sizeof(Node)' is 32 and
+     the prefix is 16, so both are already aligned; 'arena_align' keeps that a
+     property of this table rather than of 'sizeof(Node)'. */
   for (log = 0; log < 32; log++) {
     size_t bytes = cast_sizet(32) << log;
     if (bytes > (size_t)a->cfg.small_max)
       break;
-    a->node_by_log[log] = arena_addclass(a, cast_uint(bytes), ARENA_TIER_NODE);
+    a->node_by_log[log] = arena_addclass(a, arena_align(bytes),
+                                         ARENA_TIER_NODE);
     if (bytes + 16 <= (size_t)a->cfg.small_max)
-      a->nodex_by_log[log] = arena_addclass(a, cast_uint(bytes + 16),
-                                           ARENA_TIER_NODE);
+      a->nodex_by_log[log] = arena_addclass(a, arena_align(bytes + 16),
+                                            ARENA_TIER_NODE);
   }
 }
 
